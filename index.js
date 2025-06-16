@@ -1,7 +1,6 @@
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
-const pLimit = require('p-limit');
 
 const ROBLOX_COOKIE = process.env.ROBLOX_COOKIE;
 const app = express();
@@ -21,8 +20,15 @@ const proxies = [
     "http://kouxcfva:s6cr6375gsfg@173.0.9.70:5653"
 ];
 
-// Create axios instance for each proxy
+let proxyIndex = 0;
+function getNextProxy() {
+    const proxy = proxies[proxyIndex];
+    proxyIndex = (proxyIndex + 1) % proxies.length;
+    return proxy;
+}
+
 function axiosWithProxy(proxy) {
+    // Split for http(s)://user:pass@host:port
     const url = new URL(proxy);
     return axios.create({
         proxy: {
@@ -31,29 +37,11 @@ function axiosWithProxy(proxy) {
             port: +url.port,
             auth: url.username ? { username: url.username, password: url.password } : undefined,
         },
-        timeout: 8000,
+        timeout: 10000,
         headers: {
             Cookie: `.ROBLOSECURITY=${ROBLOX_COOKIE}`
         }
     });
-}
-
-const axiosProxies = proxies.map(axiosWithProxy);
-
-// Helper to fetch one page of servers
-async function fetchServers(placeId, cursor, proxyIdx) {
-    const url = `https://games.roblox.com/v1/games/${placeId}/servers/Public?limit=100${cursor ? `&cursor=${cursor}` : ''}`;
-    return axiosProxies[proxyIdx].get(url).then(r=>r.data);
-}
-
-// Helper to shuffle array (to avoid proxy cache/collision patterns)
-function shuffle(arr) {
-    let m = arr.length, t, i;
-    while (m) {
-        i = Math.floor(Math.random() * m--);
-        t = arr[m], arr[m] = arr[i], arr[i] = t;
-    }
-    return arr;
 }
 
 app.get('/servers/:placeId/:page', async (req, res) => {
@@ -63,70 +51,54 @@ app.get('/servers/:placeId/:page', async (req, res) => {
         let pageNum = 1;
         let targetPage = parseInt(page) || 1;
 
-        // Step 1: Get the requested server page
+        // Fetch the desired server page, paging through until correct page is reached
         let serversPage = null;
         while (pageNum <= targetPage) {
-            const proxyIdx = (pageNum-1) % proxies.length;
-            serversPage = await fetchServers(placeId, cursor, proxyIdx);
+            const url = `https://games.roblox.com/v1/games/${placeId}/servers/Public?limit=100${cursor ? `&cursor=${cursor}` : ''}`;
+            const instance = axiosWithProxy(getNextProxy());
+            const resp = await instance.get(url);
+            serversPage = resp.data;
             cursor = serversPage.nextPageCursor;
             pageNum++;
             if (!cursor && pageNum <= targetPage) throw new Error("Not enough pages.");
         }
-        const servers = serversPage.data || serversPage.servers;
-        if (!Array.isArray(servers)) return res.status(400).json({error:"No servers found"});
-        
-        // Step 2: For each server, brute-force token collection
-        const limit = pLimit(proxies.length); // allow as many as proxies in parallel
-        const out = [];
-
-        await Promise.all(servers.map(async (server, idx) => {
+        // Now serversPage.servers is your server list for that page
+        const output = [];
+        for (const server of serversPage.data || serversPage.servers) {
             const playerCount = server.playing;
             const foundTokens = new Set();
-            let tries = 0;
-            let progressHistory = {};
-            let proxiesOrder = [...Array(proxies.length).keys()];
-            let tasks = [];
-            let done = false;
+            let attempts = 0;
+            let maxAttempts = 20; // avoid infinite loops on dead proxies
 
-            function logProgress() {
-                if (!progressHistory[foundTokens.size]) {
-                    progressHistory[foundTokens.size] = true;
-                    console.log(`[${server.id}] Collected: ${foundTokens.size}/${playerCount}`);
-                }
-            }
+            while (foundTokens.size < playerCount && attempts < maxAttempts) {
+                const proxy = getNextProxy();
+                const instance = axiosWithProxy(proxy);
 
-            while (foundTokens.size < playerCount && tries < 40 && !done) {
-                proxiesOrder = shuffle(proxiesOrder);
-                // Kick off N requests at once (N = proxies.length)
-                tasks = proxiesOrder.map(proxyIdx => limit(async () => {
-                    if (foundTokens.size >= playerCount || done) return;
-                    try {
-                        const serversPageResp = await fetchServers(placeId, server.nextPageCursor, proxyIdx);
-                        const allServers = serversPageResp.data || serversPageResp.servers || [];
-                        const matching = allServers.find(srv => srv.id === server.id);
-                        if (matching && Array.isArray(matching.playerTokens)) {
-                            let prev = foundTokens.size;
-                            for (const token of matching.playerTokens) foundTokens.add(token);
-                            if (foundTokens.size > prev) logProgress();
-                            if (foundTokens.size >= playerCount) done = true;
+                try {
+                    const url = `https://games.roblox.com/v1/games/${placeId}/servers/Public?limit=100&sortOrder=Asc&excludeFullGames=false&cursor=${serversPage.nextPageCursor || ''}`;
+                    const resp = await instance.get(url);
+                    // Try to find the correct server entry
+                    const servers = resp.data.data || resp.data.servers || [];
+                    const s = servers.find(srv => srv.id === server.id);
+                    if (s && Array.isArray(s.playerTokens)) {
+                        for (const token of s.playerTokens) {
+                            foundTokens.add(token);
                         }
-                    } catch (err) {
-                        // handle error
                     }
-                }));
-                await Promise.all(tasks);
-                tries++;
+                } catch (err) {
+                    // Ignore single proxy error, rotate to next
+                }
+                attempts++;
             }
 
-            out.push({
+            output.push({
                 id: server.id,
                 playing: playerCount,
                 tokens: Array.from(foundTokens)
             });
-            console.log(`[${server.id}] Final: ${foundTokens.size}/${playerCount} tokens (${foundTokens.size === playerCount ? "COMPLETE":"INCOMPLETE"})`);
-        }));
+        }
 
-        res.json({servers: out});
+        res.json({servers: output});
     } catch (err) {
         console.error(err.response?.data || err.message);
         res.status(500).json({ error: 'Failed to fetch servers' });
