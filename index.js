@@ -20,7 +20,6 @@ const proxies = [
     "http://kouxcfva:s6cr6375gsfg@173.0.9.70:5653"
 ];
 
-// Create axios instances for all proxies
 function axiosWithProxy(proxy) {
     const url = new URL(proxy);
     return axios.create({
@@ -42,9 +41,12 @@ async function fetchServers(placeId, cursor, axiosInstance) {
         const response = await axiosInstance.get(url);
         return response.data;
     } catch (err) {
-        // console.log('fetchServers error:', err.message);
         return null;
     }
+}
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 app.get('/servers/:placeId/:page', async (req, res) => {
@@ -57,7 +59,7 @@ app.get('/servers/:placeId/:page', async (req, res) => {
         // Step 1: Fetch the desired page of servers
         let serversPage = null;
         while (pageNum <= targetPage) {
-            let proxyIdx = (pageNum-1) % proxies.length;
+            let proxyIdx = (pageNum - 1) % proxies.length;
             serversPage = await fetchServers(placeId, cursor, axiosInstances[proxyIdx]);
             if (!serversPage) throw new Error("Failed to get servers page");
             cursor = serversPage.nextPageCursor;
@@ -73,34 +75,44 @@ app.get('/servers/:placeId/:page', async (req, res) => {
         for (const server of servers) {
             const { id, playing } = server;
             let tokens = new Set();
-            let tries = 0;
-            let maxTries = 100;
             let progress = 0;
+            let round = 0;
+            let maxRounds = 80;
+            let stop = false;
 
-            // Print initial status
             console.log(`\n[${id}] Target tokens: ${playing}`);
-            while (tokens.size < playing && tries < maxTries) {
-                // Try all proxies in random order each round
-                const indices = proxies.map((_, i) => i).sort(() => Math.random() - 0.5);
-                for (const idx of indices) {
-                    if (tokens.size >= playing) break;
-                    // Always fetch the *same* page for max coverage
-                    let pageData = await fetchServers(placeId, serversPage.nextPageCursor, axiosInstances[idx]);
-                    if (!pageData) continue;
-                    let batch = pageData.data || pageData.servers || [];
-                    let foundServer = batch.find(s => s.id === id);
-                    if (foundServer && Array.isArray(foundServer.playerTokens)) {
-                        let before = tokens.size;
-                        foundServer.playerTokens.forEach(tok => tokens.add(tok));
-                        if (tokens.size > before) {
-                            console.log(`[${id}] Progress: ${tokens.size}/${playing} | Proxy: #${idx+1} (${proxies[idx].split('@')[1]})`);
+            // Each proxy works in parallel
+            await new Promise(async (resolve) => {
+                let active = proxies.length;
+                proxies.forEach((proxy, idx) => {
+                    (async function worker() {
+                        while (!stop && round < maxRounds) {
+                            round++;
+                            let pageData = await fetchServers(placeId, serversPage.nextPageCursor, axiosInstances[idx]);
+                            if (!pageData) continue;
+                            let batch = pageData.data || pageData.servers || [];
+                            let foundServer = batch.find(s => s.id === id);
+                            if (foundServer && Array.isArray(foundServer.playerTokens)) {
+                                let before = tokens.size;
+                                foundServer.playerTokens.forEach(tok => tokens.add(tok));
+                                if (tokens.size > before) {
+                                    console.log(`[${id}] Progress: ${tokens.size}/${playing} | Proxy: #${idx + 1} (${proxies[idx].split('@')[1]})`);
+                                }
+                                if (tokens.size >= playing) {
+                                    stop = true;
+                                    break;
+                                }
+                            }
+                            // Optionally sleep a bit to avoid hammering (remove or adjust as needed)
+                            await sleep(100);
                         }
-                    }
-                }
-                tries++;
-            }
+                        active--;
+                        if (active === 0) resolve();
+                    })();
+                });
+            });
             if (tokens.size < playing) {
-                console.log(`[${id}] Gave up after ${tries} tries: got ${tokens.size}/${playing}`);
+                console.log(`[${id}] Gave up after ${round} rounds: got ${tokens.size}/${playing}`);
             } else {
                 console.log(`[${id}] COMPLETE: ${tokens.size}/${playing} unique tokens`);
             }
