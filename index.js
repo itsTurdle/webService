@@ -17,7 +17,6 @@ const proxies = [
   'http://kouxcfva:s6cr6375gsfg@173.0.9.70:5653'
 ]
 const scanCount = 3
-
 const axiosInstances = proxies.map(proxy => {
   const url = new URL(proxy)
   return axios.create({
@@ -35,16 +34,37 @@ const axiosInstances = proxies.map(proxy => {
   })
 })
 
-const pageCursorMap = {}
+async function getAvatarLinks(tokens) {
+  if (tokens.length === 0) return []
+  const batch = tokens.map(token => ({
+    token,
+    type: 'AvatarHeadshot',
+    size: '100x100',
+    format: 'Png',
+    isCircular: true
+  }))
+  const url = 'https://thumbnails.roblox.com/v1/batch'
+  for (const inst of axiosInstances.slice().sort(() => Math.random() - 0.5)) {
+    try {
+      const response = await inst.post(url, batch)
+      return (response.data.data || []).map(item => item.imageUrl)
+    } catch (err) {
+      if (err.response && err.response.status === 429) continue
+      break
+    }
+  }
+  return []
+}
 
+const pageCursorMap = {}
 const app = express()
 app.use(cors())
 
 app.get('/servers/:placeId/:pageNumber', async (req, res) => {
   const placeId = req.params.placeId
-  const pageNum = parseInt(req.params.pageNumber, 10)
+  const pageNumber = parseInt(req.params.pageNumber, 10)
   if (!pageCursorMap[placeId]) pageCursorMap[placeId] = {}
-  const prevCursor = pageNum === 1 ? 'initial' : pageCursorMap[placeId][pageNum - 1]
+  const prevCursor = pageNumber === 1 ? 'initial' : pageCursorMap[placeId][pageNumber - 1]
   const url = `https://games.roblox.com/v1/games/${placeId}/servers/Public?limit=100${
     prevCursor && prevCursor !== 'initial' ? `&cursor=${prevCursor}` : ''
   }`
@@ -54,7 +74,6 @@ app.get('/servers/:placeId/:pageNumber', async (req, res) => {
       .slice()
       .sort(() => Math.random() - 0.5)
       .slice(0, scanCount)
-
     const results = await Promise.allSettled(instances.map(inst => inst.get(url)))
 
     const localCache = {}
@@ -83,23 +102,29 @@ app.get('/servers/:placeId/:pageNumber', async (req, res) => {
       }
     }
 
-    pageCursorMap[placeId][pageNum] = nextCursor
+    pageCursorMap[placeId][pageNumber] = nextCursor
 
-    const servers = Object.values(localCache).map(s => ({
-      id: s.id,
-      maxPlayers: s.maxPlayers,
-      playing: s.playing,
-      ping: s.ping,
-      fps: s.fps,
-      tokens: Array.from(s.tokens)
-    }))
+    const servers = await Promise.all(
+      Object.values(localCache).map(async server => {
+        const tokens = Array.from(server.tokens)
+        const avatarLinks = await getAvatarLinks(tokens)
+        return {
+          id: server.id,
+          maxPlayers: server.maxPlayers,
+          playing: server.playing,
+          ping: server.ping,
+          fps: server.fps,
+          avatarLinks
+        }
+      })
+    )
 
     res.json({ servers, nextPageCursor: nextCursor })
-  } catch (err) {
+  } catch {
     res.status(500).json({ error: 'Internal server error' })
   }
 })
 
 app.listen(port, () => {
-  console.log(`Server on http://localhost:${port}`)
+  console.log(`Server running on http://localhost:${port}`)
 })
