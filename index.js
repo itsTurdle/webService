@@ -110,7 +110,9 @@ app.get('/servers/:placeId/:page', async (req, res) => {
                             if (foundTokens.size > prev) logProgress();
                             if (foundTokens.size >= playerCount) done = true;
                         }
-                    } catch (err) { /* ignore errors, continue */ }
+                    } catch (err) {
+                        // handle error
+                    }
                 }));
                 await Promise.all(tasks);
                 tries++;
