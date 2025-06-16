@@ -35,16 +35,6 @@ function axiosWithProxy(proxy) {
 }
 const axiosInstances = proxies.map(axiosWithProxy);
 
-async function fetchServers(placeId, cursor, axiosInstance) {
-    const url = `https://games.roblox.com/v1/games/${placeId}/servers/Public?limit=100${cursor ? `&cursor=${cursor}` : ''}`;
-    try {
-        const response = await axiosInstance.get(url);
-        return response.data;
-    } catch (err) {
-        return null;
-    }
-}
-
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -60,92 +50,77 @@ app.get('/servers/:placeId/:page', async (req, res) => {
         let serversPage = null;
         while (pageNum <= targetPage) {
             let proxyIdx = (pageNum - 1) % proxies.length;
-            serversPage = await fetchServers(placeId, cursor, axiosInstances[proxyIdx]);
+            const url = `https://games.roblox.com/v1/games/${placeId}/servers/Public?limit=100${cursor ? `&cursor=${cursor}` : ''}`;
+            serversPage = await axiosInstances[proxyIdx].get(url).then(r=>r.data).catch(e=>null);
             if (!serversPage) throw new Error("Failed to get servers page");
             cursor = serversPage.nextPageCursor;
             pageNum++;
             if (!cursor && pageNum <= targetPage) throw new Error("Not enough pages.");
         }
 
-        const servers = serversPage.data || serversPage.servers;
-        if (!Array.isArray(servers)) return res.status(400).json({ error: "No servers found" });
+        const servers = (serversPage.data || serversPage.servers || []);
+        if (!Array.isArray(servers) || !servers.length) return res.status(400).json({ error: "No servers found" });
 
-        // For status reporting
-        let allServerStates = servers.map(server => ({
-            id: server.id,
-            playing: server.playing,
-            tokens: new Set(),
-            attempts: Array(proxies.length).fill(0),
-            stop: false,
-            complete: false
-        }));
-
-        // Start periodic progress reporting
-        const interval = setInterval(() => {
-            console.log("=== Current server token progress ===");
-            allServerStates.forEach(s => {
-                console.log(`[${s.id}] ${s.tokens.size}/${s.playing} tokens collected`);
-            });
-            console.log("====================================");
-        }, 10000);
-
-        for (let sidx = 0; sidx < servers.length; ++sidx) {
-            const state = allServerStates[sidx];
-            const { id, playing } = state;
-            let { tokens, attempts } = state;
-            let throttle = 2000;
-
-            console.log(`\n[${id}] Target tokens: ${playing}`);
-            await new Promise(resolve => {
-                let active = proxies.length;
-                proxies.forEach((proxy, idx) => {
-                    (async function worker() {
-                        while (!state.stop) {
-                            attempts[idx]++;
-                            let pageData = await fetchServers(placeId, serversPage.nextPageCursor, axiosInstances[idx]);
-                            if (pageData) {
-                                let batch = pageData.data || pageData.servers || [];
-                                let foundServer = batch.find(s => s.id === id);
-                                if (foundServer && Array.isArray(foundServer.playerTokens)) {
-                                    let before = tokens.size;
-                                    foundServer.playerTokens.forEach(tok => tokens.add(tok));
-                                    if (tokens.size > before) {
-                                        console.log(`[${id}] Progress: ${tokens.size}/${playing} | Proxy: #${idx + 1} (${proxies[idx].split('@')[1]}) | Attempt: ${attempts[idx]}`);
-                                    } else {
-                                        // You can comment this out if too spammy:
-                                        console.log(`[${id}] No new tokens | Proxy: #${idx + 1} (${proxies[idx].split('@')[1]}) | Attempt: ${attempts[idx]}`);
-                                    }
-                                    if (tokens.size >= playing) {
-                                        state.stop = true;
-                                        state.complete = true;
-                                        break;
-                                    }
-                                } else {
-                                    console.log(`[${id}] No server data | Proxy: #${idx + 1} (${proxies[idx].split('@')[1]}) | Attempt: ${attempts[idx]}`);
-                                }
-                            } else {
-                                console.log(`[${id}] Request failed | Proxy: #${idx + 1} (${proxies[idx].split('@')[1]}) | Attempt: ${attempts[idx]}`);
-                            }
-                            await sleep(throttle);
-                        }
-                        active--;
-                        if (active === 0) resolve();
-                    })();
-                });
-            });
-
-            if (tokens.size < playing) {
-                console.log(`[${id}] Finished (could not get all, got ${tokens.size}/${playing})`);
-            } else {
-                console.log(`[${id}] COMPLETE: ${tokens.size}/${playing} unique tokens`);
-            }
+        // One token set per server
+        let state = {};
+        for (const server of servers) {
+            state[server.id] = {
+                id: server.id,
+                playing: server.playing,
+                tokens: new Set(),
+                finished: false
+            };
         }
+
+        let finishedCount = 0;
+        const throttle = 2000; // ms per proxy per request
+
+        // Print progress every 5 seconds
+        const interval = setInterval(() => {
+            let out = "[PROGRESS] ";
+            for (const s of Object.values(state)) {
+                out += `[${s.id}] ${s.tokens.size}/${s.playing}  `;
+            }
+            console.log(out);
+        }, 5000);
+
+        // Start all proxies in parallel
+        await new Promise(resolve => {
+            proxies.forEach((proxy, idx) => {
+                (async function worker() {
+                    while (finishedCount < servers.length) {
+                        const url = `https://games.roblox.com/v1/games/${placeId}/servers/Public?limit=100${cursor ? `&cursor=${cursor}` : ''}`;
+                        let pageData = await axiosInstances[idx].get(url).then(r=>r.data).catch(e=>null);
+                        if (pageData && Array.isArray(pageData.data || pageData.servers)) {
+                            let batch = (pageData.data || pageData.servers);
+                            for (const s of batch) {
+                                if (!state[s.id] || state[s.id].finished) continue;
+                                let before = state[s.id].tokens.size;
+                                if (Array.isArray(s.playerTokens)) {
+                                    for (const tok of s.playerTokens) state[s.id].tokens.add(tok);
+                                }
+                                if (state[s.id].tokens.size > before) {
+                                    console.log(`[${s.id}] Proxy #${idx+1} (${proxies[idx].split('@')[1]}) found tokens: ${state[s.id].tokens.size}/${state[s.id].playing}`);
+                                }
+                                if (state[s.id].tokens.size >= state[s.id].playing && !state[s.id].finished) {
+                                    state[s.id].finished = true;
+                                    finishedCount++;
+                                    console.log(`[${s.id}] COMPLETE (${state[s.id].tokens.size}/${state[s.id].playing})`);
+                                }
+                            }
+                        }
+                        await sleep(throttle);
+                    }
+                    resolve();
+                })();
+            });
+        });
 
         clearInterval(interval);
 
         // Output results
         res.json({
-            servers: allServerStates.map(s => ({
+            servers: Object.values(state).map(s => ({
                 id: s.id,
                 playing: s.playing,
                 tokens: Array.from(s.tokens)
@@ -153,13 +128,12 @@ app.get('/servers/:placeId/:page', async (req, res) => {
         });
     } catch (err) {
         if (err.response && err.response.data) {
-          console.error("Roblox API error:", JSON.stringify(err.response.data));
-          res.status(500).json({ error: err.response.data });
+            console.error("Roblox API error:", JSON.stringify(err.response.data));
+            res.status(500).json({ error: err.response.data });
         } else {
-          console.error("Server error:", err.message);
-          res.status(500).json({ error: err.message });
-}
-
+            console.error("Server error:", err.message);
+            res.status(500).json({ error: err.message });
+        }
     }
 });
 
