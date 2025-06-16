@@ -83,9 +83,8 @@ app.get('/servers/:placeId/:page', async (req, res) => {
                             foundTokens.add(token);
                         }
                     }
-                try {
-                    // something
-                }
+                } catch (err) {
+                    // handle error
                 }
                 attempts++;
             }
