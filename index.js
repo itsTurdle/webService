@@ -15,7 +15,7 @@ app.get('/servers/:placeId', async (req, res) => {
 
     const response = await axios.get(url, {
       headers: {
-        Cookie: .ROBLOSECURITY=${ROBLOX_COOKIE}
+        Cookie: `.ROBLOSECURITY=${ROBLOX_COOKIE}`
       }
     });
 
@@ -27,4 +27,4 @@ app.get('/servers/:placeId', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(Proxy running on port ${PORT}));
+app.listen(PORT, () => console.log(`Proxy running on port ${PORT}`));
