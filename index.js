@@ -44,7 +44,7 @@ async function getAvatarLinks(tokens) {
     format: 'Png',
     isCircular: true
   }))
-  const url = 'https://thumbnails.roproxy.com/v1/batch'
+  const url = 'https://thumbnails.roblox.com/v1/batch'
   for (const inst of axiosInstances.slice().sort(() => Math.random() - .5)) {
     try {
       const r = await inst.post(url, batch)
