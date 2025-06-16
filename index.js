@@ -1,7 +1,6 @@
 const express = require('express');
 const axios = require('axios');
 const cors = require('cors');
-const pLimit = require('p-limit');
 
 const ROBLOX_COOKIE = process.env.ROBLOX_COOKIE;
 const app = express();
@@ -21,39 +20,31 @@ const proxies = [
     "http://kouxcfva:s6cr6375gsfg@173.0.9.70:5653"
 ];
 
-// Create axios instance for each proxy
+// Create axios instances for all proxies
 function axiosWithProxy(proxy) {
     const url = new URL(proxy);
     return axios.create({
         proxy: {
-            protocol: url.protocol.replace(':',''),
+            protocol: url.protocol.replace(':', ''),
             host: url.hostname,
             port: +url.port,
             auth: url.username ? { username: url.username, password: url.password } : undefined,
         },
-        timeout: 8000,
-        headers: {
-            Cookie: `.ROBLOSECURITY=${ROBLOX_COOKIE}`
-        }
+        timeout: 7000,
+        headers: { Cookie: `.ROBLOSECURITY=${ROBLOX_COOKIE}` }
     });
 }
+const axiosInstances = proxies.map(axiosWithProxy);
 
-const axiosProxies = proxies.map(axiosWithProxy);
-
-// Helper to fetch one page of servers
-async function fetchServers(placeId, cursor, proxyIdx) {
+async function fetchServers(placeId, cursor, axiosInstance) {
     const url = `https://games.roblox.com/v1/games/${placeId}/servers/Public?limit=100${cursor ? `&cursor=${cursor}` : ''}`;
-    return axiosProxies[proxyIdx].get(url).then(r=>r.data);
-}
-
-// Helper to shuffle array (to avoid proxy cache/collision patterns)
-function shuffle(arr) {
-    let m = arr.length, t, i;
-    while (m) {
-        i = Math.floor(Math.random() * m--);
-        t = arr[m], arr[m] = arr[i], arr[i] = t;
+    try {
+        const response = await axiosInstance.get(url);
+        return response.data;
+    } catch (err) {
+        // console.log('fetchServers error:', err.message);
+        return null;
     }
-    return arr;
 }
 
 app.get('/servers/:placeId/:page', async (req, res) => {
@@ -63,68 +54,60 @@ app.get('/servers/:placeId/:page', async (req, res) => {
         let pageNum = 1;
         let targetPage = parseInt(page) || 1;
 
-        // Step 1: Get the requested server page
+        // Step 1: Fetch the desired page of servers
         let serversPage = null;
         while (pageNum <= targetPage) {
-            const proxyIdx = (pageNum-1) % proxies.length;
-            serversPage = await fetchServers(placeId, cursor, proxyIdx);
+            let proxyIdx = (pageNum-1) % proxies.length;
+            serversPage = await fetchServers(placeId, cursor, axiosInstances[proxyIdx]);
+            if (!serversPage) throw new Error("Failed to get servers page");
             cursor = serversPage.nextPageCursor;
             pageNum++;
             if (!cursor && pageNum <= targetPage) throw new Error("Not enough pages.");
         }
+
         const servers = serversPage.data || serversPage.servers;
-        if (!Array.isArray(servers)) return res.status(400).json({error:"No servers found"});
-        
-        // Step 2: For each server, brute-force token collection
-        const limit = pLimit(proxies.length); // allow as many as proxies in parallel
-        const out = [];
+        if (!Array.isArray(servers)) return res.status(400).json({ error: "No servers found" });
 
-        await Promise.all(servers.map(async (server, idx) => {
-            const playerCount = server.playing;
-            const foundTokens = new Set();
+        const results = [];
+
+        for (const server of servers) {
+            const { id, playing } = server;
+            let tokens = new Set();
             let tries = 0;
-            let progressHistory = {};
-            let proxiesOrder = [...Array(proxies.length).keys()];
-            let tasks = [];
-            let done = false;
+            let maxTries = 100;
+            let progress = 0;
 
-            function logProgress() {
-                if (!progressHistory[foundTokens.size]) {
-                    progressHistory[foundTokens.size] = true;
-                    console.log(`[${server.id}] Collected: ${foundTokens.size}/${playerCount}`);
-                }
-            }
-
-            while (foundTokens.size < playerCount && tries < 40 && !done) {
-                proxiesOrder = shuffle(proxiesOrder);
-                // Kick off N requests at once (N = proxies.length)
-                tasks = proxiesOrder.map(proxyIdx => limit(async () => {
-                    if (foundTokens.size >= playerCount || done) return;
-                    try {
-                        const serversPageResp = await fetchServers(placeId, server.nextPageCursor, proxyIdx);
-                        const allServers = serversPageResp.data || serversPageResp.servers || [];
-                        const matching = allServers.find(srv => srv.id === server.id);
-                        if (matching && Array.isArray(matching.playerTokens)) {
-                            let prev = foundTokens.size;
-                            for (const token of matching.playerTokens) foundTokens.add(token);
-                            if (foundTokens.size > prev) logProgress();
-                            if (foundTokens.size >= playerCount) done = true;
+            // Print initial status
+            console.log(`\n[${id}] Target tokens: ${playing}`);
+            while (tokens.size < playing && tries < maxTries) {
+                // Try all proxies in random order each round
+                const indices = proxies.map((_, i) => i).sort(() => Math.random() - 0.5);
+                for (const idx of indices) {
+                    if (tokens.size >= playing) break;
+                    // Always fetch the *same* page for max coverage
+                    let pageData = await fetchServers(placeId, serversPage.nextPageCursor, axiosInstances[idx]);
+                    if (!pageData) continue;
+                    let batch = pageData.data || pageData.servers || [];
+                    let foundServer = batch.find(s => s.id === id);
+                    if (foundServer && Array.isArray(foundServer.playerTokens)) {
+                        let before = tokens.size;
+                        foundServer.playerTokens.forEach(tok => tokens.add(tok));
+                        if (tokens.size > before) {
+                            console.log(`[${id}] Progress: ${tokens.size}/${playing} | Proxy: #${idx+1} (${proxies[idx].split('@')[1]})`);
                         }
-                    } catch (err) { /* ignore errors, continue */ }
-                }));
-                await Promise.all(tasks);
+                    }
+                }
                 tries++;
             }
+            if (tokens.size < playing) {
+                console.log(`[${id}] Gave up after ${tries} tries: got ${tokens.size}/${playing}`);
+            } else {
+                console.log(`[${id}] COMPLETE: ${tokens.size}/${playing} unique tokens`);
+            }
+            results.push({ id, playing, tokens: Array.from(tokens) });
+        }
 
-            out.push({
-                id: server.id,
-                playing: playerCount,
-                tokens: Array.from(foundTokens)
-            });
-            console.log(`[${server.id}] Final: ${foundTokens.size}/${playerCount} tokens (${foundTokens.size === playerCount ? "COMPLETE":"INCOMPLETE"})`);
-        }));
-
-        res.json({servers: out});
+        res.json({ servers: results });
     } catch (err) {
         console.error(err.response?.data || err.message);
         res.status(500).json({ error: 'Failed to fetch servers' });
