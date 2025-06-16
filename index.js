@@ -60,12 +60,14 @@ async function getAvatarLinks(tokens) {
 const app = express()
 app.use(cors())
 
-app.get('/servers/:placeId/:pageCursor', async (req, res) => {
+app.get('/servers/:placeId/:pageCursor?', async (req, res) => {
   const { placeId, pageCursor } = req.params
-  let targetUrl = `https://games.roblox.com/v1/games/${placeId}/servers/Public?limit=100`
-  if (pageCursor && pageCursor !== 'initial') {
-    targetUrl += `&cursor=${encodeURIComponent(pageCursor)}`
-  }
+  const cursorPart = pageCursor && pageCursor !== 'initial'
+    ? `&cursor=${encodeURIComponent(pageCursor)}`
+    : ''
+  const targetUrl = 
+    `https://games.roblox.com/v1/games/${placeId}/servers/Public?limit=100` +
+    cursorPart
 
   try {
     const instances = axiosInstances
