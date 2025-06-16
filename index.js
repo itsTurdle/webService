@@ -75,45 +75,50 @@ app.get('/servers/:placeId/:page', async (req, res) => {
         for (const server of servers) {
             const { id, playing } = server;
             let tokens = new Set();
-            let progress = 0;
-            let round = 0;
-            let maxRounds = 80;
             let stop = false;
+            let attempts = Array(proxies.length).fill(0);
+            let throttle = 2000; // ms between requests per-proxy (edit as needed)
 
             console.log(`\n[${id}] Target tokens: ${playing}`);
-            // Each proxy works in parallel
-            await new Promise(async (resolve) => {
+
+            await new Promise(resolve => {
                 let active = proxies.length;
                 proxies.forEach((proxy, idx) => {
                     (async function worker() {
-                        while (!stop && round < maxRounds) {
-                            console.log(`[${id}] Round ${round + 1}/${maxRounds} starting...`);
-                            round++;
+                        while (!stop) {
+                            attempts[idx]++;
                             let pageData = await fetchServers(placeId, serversPage.nextPageCursor, axiosInstances[idx]);
-                            if (!pageData) continue;
-                            let batch = pageData.data || pageData.servers || [];
-                            let foundServer = batch.find(s => s.id === id);
-                            if (foundServer && Array.isArray(foundServer.playerTokens)) {
-                                let before = tokens.size;
-                                foundServer.playerTokens.forEach(tok => tokens.add(tok));
-                                if (tokens.size > before) {
-                                    console.log(`[${id}] Progress: ${tokens.size}/${playing} | Proxy: #${idx + 1} (${proxies[idx].split('@')[1]})`);
+                            if (pageData) {
+                                let batch = pageData.data || pageData.servers || [];
+                                let foundServer = batch.find(s => s.id === id);
+                                if (foundServer && Array.isArray(foundServer.playerTokens)) {
+                                    let before = tokens.size;
+                                    foundServer.playerTokens.forEach(tok => tokens.add(tok));
+                                    if (tokens.size > before) {
+                                        console.log(`[${id}] Progress: ${tokens.size}/${playing} | Proxy: #${idx + 1} (${proxies[idx].split('@')[1]}) | Attempt: ${attempts[idx]}`);
+                                    } else {
+                                        console.log(`[${id}] No new tokens | Proxy: #${idx + 1} (${proxies[idx].split('@')[1]}) | Attempt: ${attempts[idx]}`);
+                                    }
+                                    if (tokens.size >= playing) {
+                                        stop = true;
+                                        break;
+                                    }
+                                } else {
+                                    console.log(`[${id}] No server data | Proxy: #${idx + 1} (${proxies[idx].split('@')[1]}) | Attempt: ${attempts[idx]}`);
                                 }
-                                if (tokens.size >= playing) {
-                                    stop = true;
-                                    break;
-                                }
+                            } else {
+                                console.log(`[${id}] Request failed | Proxy: #${idx + 1} (${proxies[idx].split('@')[1]}) | Attempt: ${attempts[idx]}`);
                             }
-                            // Optionally sleep a bit to avoid hammering (remove or adjust as needed)
-                            await sleep(100);
+                            await sleep(throttle);
                         }
                         active--;
                         if (active === 0) resolve();
                     })();
                 });
             });
+
             if (tokens.size < playing) {
-                console.log(`[${id}] Gave up after ${round} rounds: got ${tokens.size}/${playing}`);
+                console.log(`[${id}] Finished (could not get all, got ${tokens.size}/${playing})`);
             } else {
                 console.log(`[${id}] COMPLETE: ${tokens.size}/${playing} unique tokens`);
             }
