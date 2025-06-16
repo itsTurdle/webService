@@ -17,15 +17,12 @@ const PROXIES = [
     "http://kouxcfva:s6cr6375gsfg@104.239.105.125:6655",
     "http://kouxcfva:s6cr6375gsfg@173.0.9.70:5653"
 ];
-const AVATAR_IMG_SIZE = "150x150"; // Avatar image size to use for matching
+const SCAN_COUNT = 3; // Number of parallel scans to perform on the target page
 
 // --- INITIALIZATION ---
 const app = express();
 app.use(cors());
 app.use(express.json());
-
-// Create a single, non-proxied axios instance for general API calls
-const baseAxios = axios.create({ timeout: 10000 });
 
 // Helper to create a proxied Axios instance
 function createAxiosInstance(proxy) {
@@ -47,126 +44,98 @@ function createAxiosInstance(proxy) {
 }
 const proxiedAxiosInstances = PROXIES.map(createAxiosInstance);
 
-// --- ROBLOX API HELPERS ---
-
-async function getUserId(username) {
-    const response = await baseAxios.post("https://users.roblox.com/v1/usernames/users", {
-        usernames: [username],
-        excludeBannedUsers: false
-    });
-    const user = response.data.data[0];
-    if (!user) throw new Error("User not found");
-    return user.id;
-}
-
-async function getTargetAvatarUrl(userId) {
-    const url = `https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds=${userId}&size=${AVATAR_IMG_SIZE}&format=Png&isCircular=false`;
-    const response = await baseAxios.get(url);
-    const avatar = response.data.data[0];
-    if (!avatar || !avatar.imageUrl) throw new Error("Could not get target avatar image");
-    return avatar.imageUrl;
-}
-
-async function getAvatarUrlsFromTokens(tokens, axiosInstance) {
-    if (!tokens || tokens.length === 0) return [];
-    const batchRequest = tokens.map(token => ({
-        token: token,
-        type: "AvatarHeadshot",
-        size: AVATAR_IMG_SIZE,
-        format: "Png",
-        isCircular: false
-    }));
-    const response = await axiosInstance.post("https://thumbnails.roblox.com/v1/batch", batchRequest);
-    return response.data.data.map(item => item.imageUrl);
+if (proxiedAxiosInstances.length < SCAN_COUNT) {
+    throw new Error(`Configuration error: At least ${SCAN_COUNT} proxies are required.`);
 }
 
 
 // --- PRIMARY API ENDPOINT ---
-app.get('/find-by-username/:placeId/:username', async (req, res) => {
-    const { placeId, username } = req.params;
-    let { cursor } = req.query;
+app.get('/servers/:placeId/:pageNumber', async (req, res) => {
+    const { placeId } = req.params;
+    const pageNumber = parseInt(req.params.pageNumber, 10);
 
-    if (!placeId || !username) {
-        return res.status(400).json({ error: "Place ID and username are required." });
+    if (isNaN(pageNumber) || pageNumber < 1) {
+        return res.status(400).json({ error: "Page number must be a positive integer." });
     }
 
+    let currentPage = 1;
+    let cursor = null;
+    const navigatorInstance = proxiedAxiosInstances[0]; // Use the first proxy to navigate
+
     try {
-        // 1. Get the target user's info first
-        console.log(`Looking up user: ${username}`);
-        const userId = await getUserId(username);
-        const targetAvatarUrl = await getTargetAvatarUrl(userId);
-        console.log(`Target Acquired: ${username} (ID: ${userId})`);
-        console.log(`Target Avatar URL: ${targetAvatarUrl}`);
-
-        // 2. Prepare to scan the server list with multiple proxies
-        const serverListUrl = `https://games.roblox.com/v1/games/${placeId}/servers/Public?limit=100${cursor ? `&cursor=${cursor}` : ''}`;
-        const instancesToUse = [...proxiedAxiosInstances].sort(() => 0.5 - Math.random()).slice(0, 3);
-        
-        console.log(`\nScanning Place ID ${placeId} with 3 proxies...`);
-
-        // 3. Make parallel requests to the server list
-        const serverPagePromises = instancesToUse.map(instance => instance.get(serverListUrl));
-        const serverPageResults = await Promise.allSettled(serverPagePromises);
-
-        let found = false;
-
-        // 4. Process results and find the match
-        for (const result of serverPageResults) {
-            if (found) break; // Stop if already found in another parallel request
-            if (result.status === 'rejected') {
-                 console.warn(`A proxy request failed to get server list: ${result.reason.message}`);
-                 continue;
+        // 1. Navigate to the starting cursor of the desired page
+        console.log(`Navigating to page ${pageNumber} for Place ID: ${placeId}...`);
+        while (currentPage < pageNumber) {
+            const url = `https://games.roblox.com/v1/games/${placeId}/servers/Public?limit=100${cursor ? `&cursor=${cursor}` : ''}`;
+            const response = await navigatorInstance.get(url);
+            cursor = response.data.nextPageCursor;
+            if (!cursor) {
+                console.warn(`Reached the end of server list before getting to page ${pageNumber}.`);
+                return res.status(404).json({ error: `Page not found. The server list only has ${currentPage} pages.` });
             }
+            currentPage++;
+        }
+        console.log(`Arrived at page ${pageNumber}. Current cursor: ${cursor || 'None'}`);
 
-            const servers = result.value.data.data || [];
-            for (const server of servers) {
-                if (found) break;
+        // 2. Scan the target page with multiple proxies
+        const instancesToUse = [...proxiedAxiosInstances].sort(() => 0.5 - Math.random()).slice(0, SCAN_COUNT);
+        const targetUrl = `https://games.roblox.com/v1/games/${placeId}/servers/Public?limit=100${cursor ? `&cursor=${cursor}` : ''}`;
 
-                // Use a proxied instance for the batch thumbnail request too
-                const randomProxy = instancesToUse[Math.floor(Math.random() * instancesToUse.length)];
+        console.log(`Performing ${SCAN_COUNT} parallel scans on: ${targetUrl}`);
+        const scanPromises = instancesToUse.map(instance => instance.get(targetUrl));
+        const scanResults = await Promise.allSettled(scanPromises);
 
-                try {
-                    const avatarUrls = await getAvatarUrlsFromTokens(server.playerTokens, randomProxy);
-                    if (avatarUrls.includes(targetAvatarUrl)) {
-                        found = true;
-                        console.log(`[SUCCESS] Match found in Server ID: ${server.id}`);
-                        return res.json({
-                            status: 'found',
-                            server: {
-                                id: server.id,
-                                playing: server.playing
-                            },
-                            nextPageCursor: result.value.data.nextPageCursor
-                        });
-                    }
-                } catch (batchError) {
-                    console.warn(`Could not get thumbnails for server ${server.id}: ${batchError.message}`);
+        // 3. Aggregate all unique tokens
+        const allTokens = new Set();
+        let finalNextPageCursor = null;
+
+        for (const result of scanResults) {
+            if (result.status === 'fulfilled' && result.value.data) {
+                const pageData = result.value.data;
+                const servers = pageData.data || [];
+                
+                // Set the next page cursor from the first successful request
+                if (pageData.nextPageCursor && !finalNextPageCursor) {
+                    finalNextPageCursor = pageData.nextPageCursor;
                 }
+
+                for (const server of servers) {
+                    if (server.playerTokens && Array.isArray(server.playerTokens)) {
+                        for (const token of server.playerTokens) {
+                            allTokens.add(token);
+                        }
+                    }
+                }
+            } else if (result.status === 'rejected') {
+                console.warn(`A proxy scan failed: ${result.reason.message}`);
             }
         }
         
-        // 5. If no match was found after all checks
-        if (!found) {
-            const nextCursor = serverPageResults.find(r => r.status === 'fulfilled')?.value?.data?.nextPageCursor;
-            console.log("User not found on this page.");
-            return res.status(404).json({
-                status: 'not_found',
-                message: 'User not found on this server page.',
-                nextPageCursor: nextCursor || null
-            });
-        }
+        console.log(`Found ${allTokens.size} unique tokens on page ${pageNumber}.`);
+
+        // 4. Format and return the response
+        res.status(200).json({
+            status: 200,
+            response: {
+                tokens: Array.from(allTokens),
+                nextPageCursor: finalNextPageCursor
+            }
+        });
 
     } catch (error) {
-        console.error("An error occurred during the search process:", error.message);
-        return res.status(500).json({ error: error.message || "An internal server error occurred." });
+        console.error("An error occurred during the process:", error.message);
+        if (error.response) {
+             console.error("Roblox API Error:", error.response.data);
+        }
+        return res.status(500).json({ error: "An internal server error occurred." });
     }
 });
 
 
 // --- SERVER START ---
 app.listen(PORT, () => {
-    console.log(`Roblox Player Finder (Corrected Logic) is running on http://localhost:${PORT}`);
+    console.log(`Roblox Token Aggregator is running on http://localhost:${PORT}`);
     if (!ROBLOX_COOKIE) {
-        console.warn("Warning: ROBLOX_COOKIE environment variable is not set. Proxied requests will fail.");
+        console.warn("Warning: ROBLOX_COOKIE environment variable is not set. Requests will likely fail.");
     }
 });
