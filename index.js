@@ -87,6 +87,7 @@ app.get('/servers/:placeId/:page', async (req, res) => {
                 proxies.forEach((proxy, idx) => {
                     (async function worker() {
                         while (!stop && round < maxRounds) {
+                            console.log(`[${id}] Round ${round + 1}/${maxRounds} starting...`);
                             round++;
                             let pageData = await fetchServers(placeId, serversPage.nextPageCursor, axiosInstances[idx]);
                             if (!pageData) continue;
