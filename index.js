@@ -18,20 +18,14 @@ const proxies = [
 ]
 const scanCount = 3
 
-const app = express()
-app.use(cors())
-app.use(express.json())
-
-function createAxiosInstance(proxy) {
+const axiosInstances = proxies.map(proxy => {
   const url = new URL(proxy)
   return axios.create({
     proxy: {
       protocol: url.protocol.replace(':', ''),
       host: url.hostname,
       port: parseInt(url.port, 10),
-      auth: url.username
-        ? { username: url.username, password: url.password }
-        : undefined
+      auth: url.username ? { username: url.username, password: url.password } : undefined
     },
     timeout: 10000,
     headers: {
@@ -39,36 +33,37 @@ function createAxiosInstance(proxy) {
       'User-Agent': 'Roblox/WinInet'
     }
   })
-}
+})
 
-const axiosInstances = proxies.map(createAxiosInstance)
+const pageCursorMap = {}
 
-app.post('/scan/:placeId', async (req, res) => {
+const app = express()
+app.use(cors())
+
+app.get('/servers/:placeId/:pageNumber', async (req, res) => {
   const placeId = req.params.placeId
-  const cursor = req.body.cursor || 'initial'
+  const pageNum = parseInt(req.params.pageNumber, 10)
+  if (!pageCursorMap[placeId]) pageCursorMap[placeId] = {}
+  const prevCursor = pageNum === 1 ? 'initial' : pageCursorMap[placeId][pageNum - 1]
+  const url = `https://games.roblox.com/v1/games/${placeId}/servers/Public?limit=100${
+    prevCursor && prevCursor !== 'initial' ? `&cursor=${prevCursor}` : ''
+  }`
+
   try {
     const instances = axiosInstances
       .slice()
       .sort(() => Math.random() - 0.5)
       .slice(0, scanCount)
-    const url = `https://games.roblox.com/v1/games/${placeId}/servers/Public?limit=100${
-      cursor !== 'initial' ? `&cursor=${cursor}` : ''
-    }`
-    console.log(`[${placeId}] scanning ${scanCount} instances, cursor=${cursor}`)
+
+    const results = await Promise.allSettled(instances.map(inst => inst.get(url)))
 
     const localCache = {}
-    let nextPageCursor = null
+    let nextCursor = null
 
-    const results = await Promise.allSettled(
-      instances.map(inst => inst.get(url))
-    )
-
-    for (const result of results) {
-      if (result.status === 'fulfilled') {
-        const data = result.value.data
-        if (!nextPageCursor && data.nextPageCursor) {
-          nextPageCursor = data.nextPageCursor
-        }
+    for (const r of results) {
+      if (r.status === 'fulfilled') {
+        const data = r.value.data
+        if (!nextCursor && data.nextPageCursor) nextCursor = data.nextPageCursor
         ;(data.data || []).forEach(s => {
           const id = s.id
           if (!localCache[id]) {
@@ -85,10 +80,10 @@ app.post('/scan/:placeId', async (req, res) => {
             localCache[id].playing = s.playing
           }
         })
-      } else {
-        console.warn(`[${placeId}] scan failed: ${result.reason.message}`)
       }
     }
+
+    pageCursorMap[placeId][pageNum] = nextCursor
 
     const servers = Object.values(localCache).map(s => ({
       id: s.id,
@@ -99,18 +94,12 @@ app.post('/scan/:placeId', async (req, res) => {
       tokens: Array.from(s.tokens)
     }))
 
-    console.log(
-      `[${placeId}] returning ${servers.length} servers, total tokens=${
-        servers.reduce((acc, s) => acc + s.tokens.length, 0)
-      }`
-    )
-    res.json({ servers, nextPageCursor })
+    res.json({ servers, nextPageCursor: nextCursor })
   } catch (err) {
-    console.error(`[${placeId}] error: ${err.message}`)
     res.status(500).json({ error: 'Internal server error' })
   }
 })
 
 app.listen(port, () => {
-  console.log(`Server running on http://localhost:${port}`)
+  console.log(`Server on http://localhost:${port}`)
 })
