@@ -50,6 +50,8 @@ app.get('/servers/:placeId/:page', async (req, res) => {
         let cursor = null;
         let pageNum = 1;
         let targetPage = parseInt(page) || 1;
+
+        // Fetch the desired server page, paging through until correct page is reached
         let serversPage = null;
         while (pageNum <= targetPage) {
             const url = `https://games.roblox.com/v1/games/${placeId}/servers/Public?limit=100${cursor ? `&cursor=${cursor}` : ''}`;
@@ -60,7 +62,7 @@ app.get('/servers/:placeId/:page', async (req, res) => {
             pageNum++;
             if (!cursor && pageNum <= targetPage) throw new Error("Not enough pages.");
         }
-        
+        // Now serversPage.servers is your server list for that page
         const output = [];
         for (const server of serversPage.data || serversPage.servers) {
             const playerCount = server.playing;
@@ -75,7 +77,7 @@ app.get('/servers/:placeId/:page', async (req, res) => {
                 try {
                     const url = `https://games.roblox.com/v1/games/${placeId}/servers/Public?limit=100&sortOrder=Asc&excludeFullGames=false&cursor=${serversPage.nextPageCursor || ''}`;
                     const resp = await instance.get(url);
-                    
+                    // Try to find the correct server entry
                     const servers = resp.data.data || resp.data.servers || [];
                     const s = servers.find(srv => srv.id === server.id);
                     if (s && Array.isArray(s.playerTokens)) {
@@ -84,7 +86,7 @@ app.get('/servers/:placeId/:page', async (req, res) => {
                         }
                     }
                 } catch (err) {
-                    // handle error
+                    // Ignore single proxy error, rotate to next
                 }
                 attempts++;
             }
