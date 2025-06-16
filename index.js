@@ -62,11 +62,10 @@ app.use(cors())
 
 app.get('/servers/:placeId/:pageCursor', async (req, res) => {
   const { placeId, pageCursor } = req.params
-  const cursor = pageCursor && pageCursor !== 'initial' ? pageCursor : ''
-  const encoded = encodeURIComponent(pageCursor)
-  const targetUrl = 
-    `https://games.roblox.com/v1/games/${placeId}/servers/Public?limit=100` +
-    (encoded ? `&cursor=${encoded}` : '')
+  let targetUrl = `https://games.roblox.com/v1/games/${placeId}/servers/Public?limit=100`
+  if (pageCursor && pageCursor !== 'initial') {
+    targetUrl += `&cursor=${encodeURIComponent(pageCursor)}`
+  }
 
   try {
     const instances = axiosInstances
