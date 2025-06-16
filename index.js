@@ -152,8 +152,14 @@ app.get('/servers/:placeId/:page', async (req, res) => {
             }))
         });
     } catch (err) {
-        console.error(err.response?.data || err.message);
-        res.status(500).json({ error: 'Failed to fetch servers' });
+        if (err.response && err.response.data) {
+          console.error("Roblox API error:", JSON.stringify(err.response.data));
+          res.status(500).json({ error: err.response.data });
+        } else {
+          console.error("Server error:", err.message);
+          res.status(500).json({ error: err.message });
+}
+
     }
 });
 
