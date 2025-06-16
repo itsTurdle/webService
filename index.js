@@ -17,6 +17,7 @@ const proxies = [
   'http://kouxcfva:s6cr6375gsfg@173.0.9.70:5653'
 ]
 const scanCount = 3
+
 const axiosInstances = proxies.map(proxy => {
   const url = new URL(proxy)
   return axios.create({
@@ -24,7 +25,9 @@ const axiosInstances = proxies.map(proxy => {
       protocol: url.protocol.replace(':', ''),
       host: url.hostname,
       port: parseInt(url.port, 10),
-      auth: url.username ? { username: url.username, password: url.password } : undefined
+      auth: url.username
+        ? { username: url.username, password: url.password }
+        : undefined
     },
     timeout: 10000,
     headers: {
@@ -34,8 +37,31 @@ const axiosInstances = proxies.map(proxy => {
   })
 })
 
+async function fetchCursor(placeId, cursorVal) {
+  const url = `https://games.roblox.com/v1/games/${placeId}/servers/Public?limit=100${cursorVal ? `&cursor=${cursorVal}` : ''}`
+  for (const inst of axiosInstances.slice().sort(() => Math.random() - .5)) {
+    try {
+      const { data } = await inst.get(url)
+      return data.nextPageCursor || ''
+    } catch (err) {
+      if (err.response?.status === 429) continue
+      return ''
+    }
+  }
+  return ''
+}
+
+async function getPageCursor(placeId, targetPage) {
+  let cursor = ''
+  for (let i = 1; i < targetPage; i++) {
+    cursor = await fetchCursor(placeId, cursor)
+    if (!cursor) break
+  }
+  return cursor
+}
+
 async function getAvatarLinks(tokens) {
-  if (tokens.length === 0) return []
+  if (!tokens.length) return []
   const batch = tokens.map(token => ({
     token,
     type: 'AvatarHeadshot',
@@ -43,77 +69,70 @@ async function getAvatarLinks(tokens) {
     format: 'Png',
     isCircular: true
   }))
-  const url = 'https://thumbnails.roblox.com/v1/batch'
-  for (const inst of axiosInstances.slice().sort(() => Math.random() - 0.5)) {
+  const url = 'https://thumbnails.roproxy.com/v1/batch'
+  for (const inst of axiosInstances.slice().sort(() => Math.random() - .5)) {
     try {
-      const response = await inst.post(url, batch)
-      return (response.data.data || []).map(item => item.imageUrl)
+      const r = await inst.post(url, batch)
+      return (r.data.data || []).map(i => i.imageUrl)
     } catch (err) {
-      if (err.response && err.response.status === 429) continue
+      if (err.response?.status === 429) continue
       break
     }
   }
   return []
 }
 
-const pageCursorMap = {}
 const app = express()
 app.use(cors())
 
 app.get('/servers/:placeId/:pageNumber', async (req, res) => {
   const placeId = req.params.placeId
   const pageNumber = parseInt(req.params.pageNumber, 10)
-  if (!pageCursorMap[placeId]) pageCursorMap[placeId] = {}
-  const prevCursor = pageNumber === 1 ? 'initial' : pageCursorMap[placeId][pageNumber - 1]
-  const url = `https://games.roblox.com/v1/games/${placeId}/servers/Public?limit=100${
-    prevCursor && prevCursor !== 'initial' ? `&cursor=${prevCursor}` : ''
-  }`
+  const cursor = await getPageCursor(placeId, pageNumber)
+  const targetUrl = `https://games.roblox.com/v1/games/${placeId}/servers/Public?limit=100${cursor ? `&cursor=${cursor}` : ''}`
 
   try {
     const instances = axiosInstances
       .slice()
-      .sort(() => Math.random() - 0.5)
+      .sort(() => Math.random() - .5)
       .slice(0, scanCount)
-    const results = await Promise.allSettled(instances.map(inst => inst.get(url)))
+    const results = await Promise.allSettled(instances.map(i => i.get(targetUrl)))
 
     const localCache = {}
-    let nextCursor = null
+    let nextCursor = ''
 
     for (const r of results) {
       if (r.status === 'fulfilled') {
         const data = r.value.data
-        if (!nextCursor && data.nextPageCursor) nextCursor = data.nextPageCursor
-        ;(data.data || []).forEach(s => {
-          const id = s.id
+        if (!nextCursor) nextCursor = data.nextPageCursor || ''
+        ;(data.data || []).forEach(srv => {
+          const id = srv.id
           if (!localCache[id]) {
             localCache[id] = {
               id,
-              maxPlayers: s.maxPlayers,
-              playing: s.playing,
-              ping: s.ping,
-              fps: s.fps,
-              tokens: new Set(s.playerTokens || [])
+              maxPlayers: srv.maxPlayers,
+              playing: srv.playing,
+              ping: srv.ping,
+              fps: srv.fps,
+              tokens: new Set(srv.playerTokens || [])
             }
           } else {
-            s.playerTokens?.forEach(t => localCache[id].tokens.add(t))
-            localCache[id].playing = s.playing
+            srv.playerTokens?.forEach(t => localCache[id].tokens.add(t))
+            localCache[id].playing = srv.playing
           }
         })
       }
     }
 
-    pageCursorMap[placeId][pageNumber] = nextCursor
-
     const servers = await Promise.all(
-      Object.values(localCache).map(async server => {
-        const tokens = Array.from(server.tokens)
-        const avatarLinks = await getAvatarLinks(tokens)
+      Object.values(localCache).map(async srv => {
+        const avatarLinks = await getAvatarLinks(Array.from(srv.tokens))
         return {
-          id: server.id,
-          maxPlayers: server.maxPlayers,
-          playing: server.playing,
-          ping: server.ping,
-          fps: server.fps,
+          id: srv.id,
+          maxPlayers: srv.maxPlayers,
+          playing: srv.playing,
+          ping: srv.ping,
+          fps: srv.fps,
           avatarLinks
         }
       })
@@ -125,6 +144,4 @@ app.get('/servers/:placeId/:pageNumber', async (req, res) => {
   }
 })
 
-app.listen(port, () => {
-  console.log(`Server running on http://localhost:${port}`)
-})
+app.listen(port, () => console.log(`Server running on http://localhost:${port}`))
