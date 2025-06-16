@@ -70,23 +70,37 @@ app.get('/servers/:placeId/:page', async (req, res) => {
         const servers = serversPage.data || serversPage.servers;
         if (!Array.isArray(servers)) return res.status(400).json({ error: "No servers found" });
 
-        const results = [];
+        // For status reporting
+        let allServerStates = servers.map(server => ({
+            id: server.id,
+            playing: server.playing,
+            tokens: new Set(),
+            attempts: Array(proxies.length).fill(0),
+            stop: false,
+            complete: false
+        }));
 
-        for (const server of servers) {
-            const { id, playing } = server;
-            let tokens = new Set();
-            let stop = false;
-            let attempts = Array(proxies.length).fill(0);
-            let throttle = 2000; // ms between requests per-proxy (edit as needed)
+        // Start periodic progress reporting
+        const interval = setInterval(() => {
+            console.log("=== Current server token progress ===");
+            allServerStates.forEach(s => {
+                console.log(`[${s.id}] ${s.tokens.size}/${s.playing} tokens collected`);
+            });
+            console.log("====================================");
+        }, 10000);
+
+        for (let sidx = 0; sidx < servers.length; ++sidx) {
+            const state = allServerStates[sidx];
+            const { id, playing } = state;
+            let { tokens, attempts } = state;
+            let throttle = 2000;
 
             console.log(`\n[${id}] Target tokens: ${playing}`);
-
             await new Promise(resolve => {
                 let active = proxies.length;
                 proxies.forEach((proxy, idx) => {
                     (async function worker() {
-                        while (!stop) {
-                            console.log(`[${id}] Round ${round + 1}/${maxRounds} starting...`);
+                        while (!state.stop) {
                             attempts[idx]++;
                             let pageData = await fetchServers(placeId, serversPage.nextPageCursor, axiosInstances[idx]);
                             if (pageData) {
@@ -98,10 +112,12 @@ app.get('/servers/:placeId/:page', async (req, res) => {
                                     if (tokens.size > before) {
                                         console.log(`[${id}] Progress: ${tokens.size}/${playing} | Proxy: #${idx + 1} (${proxies[idx].split('@')[1]}) | Attempt: ${attempts[idx]}`);
                                     } else {
+                                        // You can comment this out if too spammy:
                                         console.log(`[${id}] No new tokens | Proxy: #${idx + 1} (${proxies[idx].split('@')[1]}) | Attempt: ${attempts[idx]}`);
                                     }
                                     if (tokens.size >= playing) {
-                                        stop = true;
+                                        state.stop = true;
+                                        state.complete = true;
                                         break;
                                     }
                                 } else {
@@ -123,10 +139,18 @@ app.get('/servers/:placeId/:page', async (req, res) => {
             } else {
                 console.log(`[${id}] COMPLETE: ${tokens.size}/${playing} unique tokens`);
             }
-            results.push({ id, playing, tokens: Array.from(tokens) });
         }
 
-        res.json({ servers: results });
+        clearInterval(interval);
+
+        // Output results
+        res.json({
+            servers: allServerStates.map(s => ({
+                id: s.id,
+                playing: s.playing,
+                tokens: Array.from(s.tokens)
+            }))
+        });
     } catch (err) {
         console.error(err.response?.data || err.message);
         res.status(500).json({ error: 'Failed to fetch servers' });
