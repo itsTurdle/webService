@@ -122,13 +122,17 @@ app.get('/servers/:placeId/:pageCursor?', async (req, res) => {
 app.get('/games/universeId=:universeId', async (req, res) => {
   const { universeId } = req.params
   const url = `https://games.roblox.com/v1/games?universeIds=${encodeURIComponent(universeId)}`
-  try {
-    const inst = axiosInstances[Math.floor(Math.random() * axiosInstances.length)]
-    const result = await inst.get(url)
-    res.json(result.data)
-  } catch (err) {
-    res.status(500).json({ error: 'Internal server error' })
+  const shuffled = axiosInstances.slice().sort(() => Math.random() - 0.5)
+  let lastError
+  for (const inst of shuffled) {
+    try {
+      const result = await inst.get(url)
+      return res.json(result.data)
+    } catch (err) {
+      lastError = err
+    }
   }
+  res.status(500).json({ error: 'All proxies failed', details: lastError?.toString() })
 })
 
 app.listen(port, () => console.log(`Server running on http://localhost:${port}`))
